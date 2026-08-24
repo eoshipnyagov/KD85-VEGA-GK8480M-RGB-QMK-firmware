@@ -26,7 +26,6 @@ SLOT = 65536
 HEADER = 256
 WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
-FRAME_RECORD = HEADER + PIXELS
 GENERIC_WRITE = 0x40000000
 GENERIC_READ = 0x80000000
 FILE_FLAG_OVERLAPPED = 0x40000000
@@ -92,12 +91,12 @@ def rgb565(image: Image.Image) -> bytes:
 def replace_pixels(packets: list[bytes], pixel_frames: list[bytes]) -> list[bytes]:
     if len(packets) != len(pixel_frames) * 16:
         raise SystemExit("Число пакетов не соответствует числу кадров")
-    # Frames are packed contiguously. They are not 64-KiB slots: each record
-    # is 256 bytes of header plus 64,800 bytes of RGB565 (0xFE20 total).
+    # The stream has one global 256-byte GIF header, followed by contiguous
+    # 64,800-byte RGB565 frames. There is no per-frame 256-byte header.
     stream = bytearray(b"".join(packet[1:] for packet in packets))
     for frame_index, pixels in enumerate(pixel_frames):
-        start = frame_index * FRAME_RECORD
-        end = start + FRAME_RECORD
+        start = HEADER + frame_index * PIXELS
+        end = start + PIXELS
         if end > len(stream):
             raise SystemExit(f"Кадр {frame_index} выходит за пределы потока")
         stream[start + HEADER:start + HEADER + PIXELS] = pixels
