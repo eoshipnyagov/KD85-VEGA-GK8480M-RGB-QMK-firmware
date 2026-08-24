@@ -26,6 +26,7 @@ SLOT = 65536
 HEADER = 256
 WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
+FRAME_RECORD = HEADER + PIXELS
 GENERIC_WRITE = 0x40000000
 GENERIC_READ = 0x80000000
 FILE_FLAG_OVERLAPPED = 0x40000000
@@ -91,16 +92,17 @@ def rgb565(image: Image.Image) -> bytes:
 def replace_pixels(packets: list[bytes], pixel_frames: list[bytes]) -> list[bytes]:
     if len(packets) != len(pixel_frames) * 16:
         raise SystemExit("Число пакетов не соответствует числу кадров")
-    output = []
+    # Frames are packed contiguously. They are not 64-KiB slots: each record
+    # is 256 bytes of header plus 64,800 bytes of RGB565 (0xFE20 total).
+    stream = bytearray(b"".join(packet[1:] for packet in packets))
     for frame_index, pixels in enumerate(pixel_frames):
-        group = packets[frame_index * 16:(frame_index + 1) * 16]
-        block = b"".join(packet[1:] for packet in group)
-        if len(block) != SLOT:
-            raise SystemExit(f"Слот {frame_index} имеет размер {len(block)}, ожидалось 65536")
-        block = block[:HEADER] + pixels + block[HEADER + PIXELS:]
-        output.extend(b"\x00" + block[offset:offset + 4096]
-                      for offset in range(0, SLOT, 4096))
-    return output
+        start = frame_index * FRAME_RECORD
+        end = start + FRAME_RECORD
+        if end > len(stream):
+            raise SystemExit(f"Кадр {frame_index} выходит за пределы потока")
+        stream[start + HEADER:start + HEADER + PIXELS] = pixels
+    return [b"\x00" + bytes(stream[offset:offset + 4096])
+            for offset in range(0, len(stream), 4096)]
 
 
 def find_one(interface: int, usage: int):
