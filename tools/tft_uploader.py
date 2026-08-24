@@ -143,6 +143,7 @@ def main() -> None:
                     help="число кадров в сессии; для GIF берутся первые кадры")
     ap.add_argument("--confirm", action="store_true", help="разрешить запись в экран")
     ap.add_argument("--dry-run", action="store_true", help="только собрать и проверить пакеты")
+    ap.add_argument("--no-ack", action="store_true", help="не читать ACK; только для диагностики с USBPcap")
     ap.add_argument("--interval", type=float, default=0.03, help="пауза между HID-пакетами")
     args = ap.parse_args()
     sequence, captured = read_template(args.template, args.frame_count)
@@ -164,32 +165,40 @@ def main() -> None:
 
     mi03 = find_one(MI03_INTERFACE, MI03_USAGE)
     mi02 = find_one(MI02_INTERFACE, MI02_USAGE)
-    service = hid.device()
-    service.open_path(mi03["path"])
     kernel32 = ctypes.windll.kernel32
+    hidll = ctypes.windll.hid
+    hidll.HidD_SetFeature.argtypes = [w.HANDLE, ctypes.c_void_p, w.ULONG]
+    hidll.HidD_SetFeature.restype = w.BOOL
+    hidll.HidD_GetFeature.argtypes = [w.HANDLE, ctypes.c_void_p, w.ULONG]
+    hidll.HidD_GetFeature.restype = w.BOOL
+    service_handle = kernel32.CreateFileW(mi03["path"].decode(), GENERIC_READ | GENERIC_WRITE,
+                                          3, None, 3, 0, None)
+    if service_handle in (0, -1):
+        raise OSError(f"MI_03 CreateFileW failed: {ctypes.GetLastError()}")
     # Use synchronous writes. With an overlapped handle, closing the handle
     # after the nominal delay can cancel queued HID transfers before USBPcap
     # ever sees them.
     handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_READ | GENERIC_WRITE,
                                   3, None, 3, 0, None)
     if handle in (0, -1):
-        service.close()
+        kernel32.CloseHandle(service_handle)
         raise OSError(f"MI_02 CreateFileW failed: {ctypes.GetLastError()}")
     read_handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_READ, 3, None, 3,
                                        FILE_FLAG_OVERLAPPED, None)
     if read_handle in (0, -1):
         kernel32.CloseHandle(handle)
-        service.close()
+        kernel32.CloseHandle(service_handle)
         raise OSError(f"MI_02 read handle failed: {ctypes.GetLastError()}")
 
     frame_index = 0
     try:
         for kind, data in sequence:
             if kind == "feature":
-                if service.send_feature_report(data) < 0:
-                    raise RuntimeError("MI_03 service report rejected")
-                response = service.get_feature_report(0, 65)
-                if not response:
+                feature_buffer = ctypes.create_string_buffer(data)
+                if not hidll.HidD_SetFeature(service_handle, feature_buffer, 65):
+                    raise RuntimeError(f"MI_03 service report rejected: {ctypes.GetLastError()}")
+                response_buffer = ctypes.create_string_buffer(65)
+                if not hidll.HidD_GetFeature(service_handle, response_buffer, 65):
                     raise RuntimeError("MI_03 did not return a feature response")
             else:
                 packet = frames[frame_index]
@@ -199,17 +208,18 @@ def main() -> None:
                 ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), None)
                 if not ok or written.value != len(packet):
                     raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {ctypes.GetLastError()}, written={written.value}")
-                ack = read_input_report(kernel32, read_handle)
-                payload = ack[1:] if ack[:1] == b"\x00" else ack
-                if len(payload) < 3 or payload[0:3] != bytes((1, 0x5A, 2)):
-                    raise RuntimeError(f"MI_02 packet {frame_index}: unexpected ACK {bytes(ack).hex()}")
+                if not args.no_ack:
+                    ack = read_input_report(kernel32, read_handle)
+                    payload = ack[1:] if ack[:1] == b"\x00" else ack
+                    if len(payload) < 3 or payload[0:3] != bytes((1, 0x5A, 2)):
+                        raise RuntimeError(f"MI_02 packet {frame_index}: unexpected ACK {bytes(ack).hex()}")
                 time.sleep(args.interval)
         time.sleep(2.0)
         print("Загрузка одного кадра завершена")
     finally:
         kernel32.CloseHandle(handle)
         kernel32.CloseHandle(read_handle)
-        service.close()
+        kernel32.CloseHandle(service_handle)
 
 
 if __name__ == "__main__":
