@@ -27,15 +27,6 @@ HEADER = 256
 WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
 GENERIC_WRITE = 0x40000000
-FILE_FLAG_OVERLAPPED = 0x40000000
-ERROR_IO_PENDING = 997
-
-
-class OVERLAPPED(ctypes.Structure):
-    _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
-                ("Offset", w.DWORD), ("OffsetHigh", w.DWORD), ("hEvent", w.HANDLE)]
-
-
 def read_template(path: Path) -> tuple[list[tuple[str, bytes]], list[bytes]]:
     events: list[tuple[str, bytes]] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -59,7 +50,13 @@ def read_template(path: Path) -> tuple[list[tuple[str, bytes]], list[bytes]]:
     # the first 16 frame writes and ignore unrelated startup traffic.
     first = frame_positions[0]
     last = frame_positions[15]
-    selected = events[max(0, first - 32):last + 1]
+    end = last + 1
+    # The official uploader emits a final service report immediately after
+    # the last data packet (04 02 in the captured one-frame session). Keep it:
+    # this is the likely commit/activate step for the newly written slot.
+    while end < len(events) and events[end][0] == "feature":
+        end += 1
+    selected = events[max(0, first - 32):end]
     if sum(kind == "frame" for kind, _ in selected) != 16:
         raise SystemExit("Не удалось выделить ровно один слот из шаблона")
     return selected, [data for kind, data in selected if kind == "frame"]
@@ -116,13 +113,14 @@ def main() -> None:
     service = hid.device()
     service.open_path(mi03["path"])
     kernel32 = ctypes.windll.kernel32
-    handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_WRITE, 3, None, 3,
-                                  FILE_FLAG_OVERLAPPED, None)
+    # Use synchronous writes. With an overlapped handle, closing the handle
+    # after the nominal delay can cancel queued HID transfers before USBPcap
+    # ever sees them.
+    handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_WRITE, 3, None, 3, 0, None)
     if handle in (0, -1):
         service.close()
         raise OSError(f"MI_02 CreateFileW failed: {ctypes.GetLastError()}")
 
-    pending = []
     frame_index = 0
     try:
         for kind, data in sequence:
@@ -132,21 +130,15 @@ def main() -> None:
             else:
                 packet = frames[frame_index]
                 frame_index += 1
-                event = kernel32.CreateEventW(None, True, False, None)
-                ov = OVERLAPPED(); ov.hEvent = event
                 buf = ctypes.create_string_buffer(packet)
                 written = w.DWORD(0)
-                ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), ctypes.byref(ov))
-                error = ctypes.GetLastError()
-                if not ok and error != ERROR_IO_PENDING:
-                    raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {error}")
-                pending.append((event, ov, buf))
+                ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), None)
+                if not ok or written.value != len(packet):
+                    raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {ctypes.GetLastError()}, written={written.value}")
                 time.sleep(args.interval)
         time.sleep(2.0)
         print("Загрузка одного кадра завершена")
     finally:
-        for event, _, _ in pending:
-            kernel32.CloseHandle(event)
         kernel32.CloseHandle(handle)
         service.close()
 
