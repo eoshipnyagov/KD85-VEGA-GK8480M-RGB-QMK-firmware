@@ -84,11 +84,35 @@ function hookCreateFile(name) {
     let address;
     try { address = Process.getModuleByName('kernel32.dll').getExportByName(name); } catch (_) { return; }
     Interceptor.attach(address, {
-        onEnter(args) { this.path = args[0].readUtf16String(); },
-        onLeave(retval) { send({source: name, path: this.path, handle: retval.toString()}); }
+        onEnter(args) {
+            this.path = args[0].readUtf16String();
+            this.access = args[1].toUInt32();
+            this.share = args[2].toUInt32();
+            this.flags = args[5].toUInt32();
+        },
+        onLeave(retval) {
+            send({source: name, path: this.path, handle: retval.toString(),
+                  access: this.access, share: this.share, flags: this.flags});
+        }
     });
 }
 hookCreateFile('CreateFileW');
+function hookCreateFileA() {
+    const address = Process.getModuleByName('kernel32.dll').getExportByName('CreateFileA');
+    Interceptor.attach(address, {
+        onEnter(args) {
+            this.path = args[0].readCString();
+            this.access = args[1].toUInt32();
+            this.share = args[2].toUInt32();
+            this.flags = args[5].toUInt32();
+        },
+        onLeave(retval) {
+            send({source: 'CreateFileA', path: this.path, handle: retval.toString(),
+                  access: this.access, share: this.share, flags: this.flags});
+        }
+    });
+}
+hookCreateFileA();
 """
 
 
