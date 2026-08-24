@@ -114,10 +114,11 @@ def read_input_report(kernel32, handle: int, timeout_ms: int = 1500) -> bytes:
     if not event:
         raise OSError(f"CreateEvent failed: {ctypes.GetLastError()}")
     ov = OVERLAPPED(); ov.hEvent = event
-    buffer = ctypes.create_string_buffer(64)
+    # HIDClass expects the report-ID byte in the user buffer as well.
+    buffer = ctypes.create_string_buffer(65)
     received = w.DWORD(0)
     try:
-        ok = kernel32.ReadFile(handle, buffer, 64, ctypes.byref(received), ctypes.byref(ov))
+        ok = kernel32.ReadFile(handle, buffer, 65, ctypes.byref(received), ctypes.byref(ov))
         error = ctypes.GetLastError()
         if not ok and error != ERROR_IO_PENDING:
             raise OSError(f"ReadFile failed: {error}")
@@ -199,7 +200,8 @@ def main() -> None:
                 if not ok or written.value != len(packet):
                     raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {ctypes.GetLastError()}, written={written.value}")
                 ack = read_input_report(kernel32, read_handle)
-                if len(ack) < 3 or ack[0:3] != bytes((1, 0x5A, 2)):
+                payload = ack[1:] if ack[:1] == b"\x00" else ack
+                if len(payload) < 3 or payload[0:3] != bytes((1, 0x5A, 2)):
                     raise RuntimeError(f"MI_02 packet {frame_index}: unexpected ACK {bytes(ack).hex()}")
                 time.sleep(args.interval)
         time.sleep(2.0)
