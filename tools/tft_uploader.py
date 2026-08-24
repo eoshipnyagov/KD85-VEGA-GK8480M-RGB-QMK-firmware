@@ -69,7 +69,9 @@ def rgb565(path: Path) -> bytes:
         for x in range(WIDTH):
             r, g, b = image.getpixel((x, y))
             value = ((r * 31 // 255) << 11) | ((g * 63 // 255) << 5) | (b * 31 // 255)
-            struct.pack_into("<H", out, (y * WIDTH + x) * 2, value)
+            # The captured official stream carries RGB565 most-significant
+            # byte first, as expected by the TFT controller.
+            struct.pack_into(">H", out, (y * WIDTH + x) * 2, value)
     return bytes(out)
 
 
