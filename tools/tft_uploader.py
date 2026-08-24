@@ -28,6 +28,15 @@ WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
 GENERIC_WRITE = 0x40000000
 GENERIC_READ = 0x80000000
+FILE_FLAG_OVERLAPPED = 0x40000000
+ERROR_IO_PENDING = 997
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 258
+
+
+class OVERLAPPED(ctypes.Structure):
+    _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
+                ("Offset", w.DWORD), ("OffsetHigh", w.DWORD), ("hEvent", w.HANDLE)]
 def read_template(path: Path, frame_count: int) -> tuple[list[tuple[str, bytes]], list[bytes]]:
     events: list[tuple[str, bytes]] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -100,6 +109,31 @@ def find_one(interface: int, usage: int):
     return devices[0]
 
 
+def read_input_report(kernel32, handle: int, timeout_ms: int = 1500) -> bytes:
+    event = kernel32.CreateEventW(None, True, False, None)
+    if not event:
+        raise OSError(f"CreateEvent failed: {ctypes.GetLastError()}")
+    ov = OVERLAPPED(); ov.hEvent = event
+    buffer = ctypes.create_string_buffer(64)
+    received = w.DWORD(0)
+    try:
+        ok = kernel32.ReadFile(handle, buffer, 64, ctypes.byref(received), ctypes.byref(ov))
+        error = ctypes.GetLastError()
+        if not ok and error != ERROR_IO_PENDING:
+            raise OSError(f"ReadFile failed: {error}")
+        status = kernel32.WaitForSingleObject(event, timeout_ms)
+        if status == WAIT_TIMEOUT:
+            kernel32.CancelIoEx(handle, ctypes.byref(ov))
+            raise TimeoutError("MI_02 ACK timeout")
+        if status != WAIT_OBJECT_0:
+            raise OSError(f"WaitForSingleObject failed: {status}")
+        if not kernel32.GetOverlappedResult(handle, ctypes.byref(ov), ctypes.byref(received), False):
+            raise OSError(f"GetOverlappedResult failed: {ctypes.GetLastError()}")
+        return bytes(buffer.raw[:received.value])
+    finally:
+        kernel32.CloseHandle(event)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("template", type=Path, help="JSONL-захват одной официальной загрузки")
@@ -131,9 +165,6 @@ def main() -> None:
     mi02 = find_one(MI02_INTERFACE, MI02_USAGE)
     service = hid.device()
     service.open_path(mi03["path"])
-    input_device = hid.device()
-    input_device.open_path(mi02["path"])
-    input_device.set_nonblocking(False)
     kernel32 = ctypes.windll.kernel32
     # Use synchronous writes. With an overlapped handle, closing the handle
     # after the nominal delay can cancel queued HID transfers before USBPcap
@@ -143,6 +174,12 @@ def main() -> None:
     if handle in (0, -1):
         service.close()
         raise OSError(f"MI_02 CreateFileW failed: {ctypes.GetLastError()}")
+    read_handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_READ, 3, None, 3,
+                                       FILE_FLAG_OVERLAPPED, None)
+    if read_handle in (0, -1):
+        kernel32.CloseHandle(handle)
+        service.close()
+        raise OSError(f"MI_02 read handle failed: {ctypes.GetLastError()}")
 
     frame_index = 0
     try:
@@ -161,15 +198,15 @@ def main() -> None:
                 ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), None)
                 if not ok or written.value != len(packet):
                     raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {ctypes.GetLastError()}, written={written.value}")
-                ack = input_device.read(64, timeout_ms=1500)
-                if len(ack) < 3 or ack[0:3] != [1, 0x5A, 2]:
+                ack = read_input_report(kernel32, read_handle)
+                if len(ack) < 3 or ack[0:3] != bytes((1, 0x5A, 2)):
                     raise RuntimeError(f"MI_02 packet {frame_index}: unexpected ACK {bytes(ack).hex()}")
                 time.sleep(args.interval)
         time.sleep(2.0)
         print("Загрузка одного кадра завершена")
     finally:
         kernel32.CloseHandle(handle)
-        input_device.close()
+        kernel32.CloseHandle(read_handle)
         service.close()
 
 
