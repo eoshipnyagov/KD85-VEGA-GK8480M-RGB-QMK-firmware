@@ -81,9 +81,10 @@ def rgb565(image: Image.Image) -> bytes:
         for x in range(WIDTH):
             r, g, b = image.getpixel((x, y))
             value = ((r * 31 // 255) << 11) | ((g * 63 // 255) << 5) | (b * 31 // 255)
-            # The captured official stream carries RGB565 most-significant
-            # byte first, as expected by the TFT controller.
-            struct.pack_into(">H", out, (y * WIDTH + x) * 2, value)
+            # The official capture starts with bytes 3D E7 for a light pixel;
+            # interpreting that as little-endian RGB565 (0xE73D) matches the
+            # source image. The TFT wire order is therefore low byte first.
+            struct.pack_into("<H", out, (y * WIDTH + x) * 2, value)
     return bytes(out)
 
 
