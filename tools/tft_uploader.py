@@ -141,7 +141,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("template", type=Path, help="JSONL-захват одной официальной загрузки")
     ap.add_argument("image", type=Path, help="PNG/JPG/GIF; используется первый кадр")
-    ap.add_argument("--frame-count", type=int, choices=(1, 2), default=1,
+    ap.add_argument("--frame-count", type=int, choices=(1, 2, 3), default=1,
                     help="число кадров в сессии; для GIF берутся первые кадры")
     ap.add_argument("--confirm", action="store_true", help="разрешить запись в экран")
     ap.add_argument("--dry-run", action="store_true", help="только собрать и проверить пакеты")
