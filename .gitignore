@@ -12,3 +12,4 @@ photo/
 *.i64
 *.idb
 *.sqlite
+__pycache__/
