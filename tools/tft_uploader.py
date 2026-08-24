@@ -32,6 +32,7 @@ FILE_FLAG_OVERLAPPED = 0x40000000
 ERROR_IO_PENDING = 997
 WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
+IOCTL_HID_GET_FEATURE = 0x000B0192
 
 
 class OVERLAPPED(ctypes.Structure):
@@ -197,9 +198,14 @@ def main() -> None:
                 feature_buffer = ctypes.create_string_buffer(data)
                 if not hidll.HidD_SetFeature(service_handle, feature_buffer, 65):
                     raise RuntimeError(f"MI_03 service report rejected: {ctypes.GetLastError()}")
-                response_buffer = ctypes.create_string_buffer(65)
-                if not hidll.HidD_GetFeature(service_handle, response_buffer, 65):
-                    raise RuntimeError("MI_03 did not return a feature response")
+                time.sleep(args.interval)
+                response_buffer = ctypes.create_string_buffer(data)
+                returned = w.DWORD(0)
+                if not kernel32.DeviceIoControl(service_handle, IOCTL_HID_GET_FEATURE,
+                                                response_buffer, 65,
+                                                response_buffer, 65,
+                                                ctypes.byref(returned), None):
+                    raise RuntimeError(f"MI_03 IOCTL_HID_GET_FEATURE failed: {ctypes.GetLastError()}")
             else:
                 packet = frames[frame_index]
                 frame_index += 1
