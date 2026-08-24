@@ -26,6 +26,7 @@ SLOT = 65536
 HEADER = 256
 WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
+PIXEL_START_ADJUST = -120  # calibration: observed common shift ≈ 60 pixels right
 GENERIC_WRITE = 0x40000000
 GENERIC_READ = 0x80000000
 FILE_FLAG_OVERLAPPED = 0x40000000
@@ -95,7 +96,7 @@ def replace_pixels(packets: list[bytes], pixel_frames: list[bytes]) -> list[byte
     # 64,800-byte RGB565 frames. There is no per-frame 256-byte header.
     stream = bytearray(b"".join(packet[1:] for packet in packets))
     for frame_index, pixels in enumerate(pixel_frames):
-        start = HEADER + frame_index * PIXELS
+        start = HEADER + PIXEL_START_ADJUST + frame_index * PIXELS
         end = start + PIXELS
         if end > len(stream):
             raise SystemExit(f"Кадр {frame_index} выходит за пределы потока")
