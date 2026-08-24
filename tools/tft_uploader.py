@@ -26,7 +26,9 @@ SLOT = 65536
 HEADER = 256
 WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
-FRAME_RECORD = HEADER + PIXELS
+# Empirical split-frame test shows a 10-byte per-frame drift. Preserve the
+# inter-frame metadata/padding present in the official stream.
+FRAME_RECORD = HEADER + PIXELS + 10
 GENERIC_WRITE = 0x40000000
 GENERIC_READ = 0x80000000
 FILE_FLAG_OVERLAPPED = 0x40000000
