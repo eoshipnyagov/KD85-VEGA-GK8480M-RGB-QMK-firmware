@@ -39,10 +39,15 @@ def main() -> None:
     one = frame(1, 1, ((20, 20, 180), (230, 30, 30)))
     two_a = frame(1, 2, ((20, 20, 180), (230, 30, 30)))
     two_b = frame(2, 2, ((10, 170, 40), (240, 190, 20)))
+    three_a = frame(1, 3, ((20, 20, 180), (230, 30, 30)))
+    three_b = frame(2, 3, ((10, 170, 40), (240, 190, 20)))
+    three_c = frame(3, 3, ((170, 20, 180), (20, 210, 220)))
     one.save(args.output / "vega-test-1-frame.gif", save_all=True, loop=0, duration=700, disposal=2, optimize=False)
     two_a.save(args.output / "vega-test-2-frames.gif", save_all=True, append_images=[two_b], loop=0, duration=700, disposal=2, optimize=False)
+    three_a.save(args.output / "vega-test-3-frames.gif", save_all=True, append_images=[three_b, three_c], loop=0, duration=700, disposal=2, optimize=False)
     one.save(args.output / "vega-test-frame-01.png")
     two_b.save(args.output / "vega-test-frame-02.png")
+    three_c.save(args.output / "vega-test-frame-03.png")
     print(args.output)
 
 
