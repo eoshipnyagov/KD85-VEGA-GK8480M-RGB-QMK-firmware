@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay captured official TFT WriteFile buffers to VEGA MI_03.
+"""Replay captured official TFT WriteFile buffers to VEGA MI_02.
 
 Only buffers copied from a prior official upload are accepted. The tool does
 not generate a protocol packet and does not touch the WB32/Vial interface.
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import hid
 
-VID, PID, INTERFACE, USAGE_PAGE = 0x05AC, 0x024F, 3, 0xFF13
+VID, PID, INTERFACE, USAGE_PAGE = 0x05AC, 0x024F, 2, 0xFF68
 PACKET_SIZE = 4097
 SLOT_SIZE = 65536
 HEADER_SIZE = 256
@@ -58,10 +58,9 @@ def load_packets(path: Path, handle: str | None) -> list[bytes]:
 
 
 def gradient_packets(packets: list[bytes]) -> list[bytes]:
-    """Replace only the captured slot's RGB565 pixels with a 2D gradient."""
-    block = b"".join(packet[1:] for packet in packets)
-    if len(block) != SLOT_SIZE:
-        raise ValueError("captured slot must be exactly 64 KiB")
+    """Replace only captured slots' RGB565 pixels with a 2D gradient."""
+    if len(packets) % 16:
+        raise ValueError("captured packet count must be a multiple of 16")
     pixels = bytearray(FRAME_SIZE)
     for y in range(HEIGHT):
         for x in range(WIDTH):
@@ -70,8 +69,15 @@ def gradient_packets(packets: list[bytes]) -> list[bytes]:
             blue = (WIDTH - 1 - x) * 31 // (WIDTH - 1)
             value = (red << 11) | (green << 5) | blue
             struct.pack_into("<H", pixels, (y * WIDTH + x) * 2, value)
-    block = block[:HEADER_SIZE] + bytes(pixels) + block[HEADER_SIZE + FRAME_SIZE:]
-    return [b"\x00" + block[offset:offset + 4096] for offset in range(0, SLOT_SIZE, 4096)]
+    output = []
+    for start in range(0, len(packets), 16):
+        block = b"".join(packet[1:] for packet in packets[start:start + 16])
+        if len(block) != SLOT_SIZE:
+            raise ValueError("captured slot must be exactly 64 KiB")
+        block = block[:HEADER_SIZE] + bytes(pixels) + block[HEADER_SIZE + FRAME_SIZE:]
+        output.extend(b"\x00" + block[offset:offset + 4096]
+                      for offset in range(0, SLOT_SIZE, 4096))
+    return output
 
 
 def main() -> None:
@@ -84,8 +90,8 @@ def main() -> None:
     if not args.confirm:
         raise SystemExit("Нужен явный флаг --confirm")
     packets = load_packets(args.jsonl, args.handle)
-    if len(packets) != 16:
-        raise SystemExit(f"Ожидалось 16 пакетов одного слота, найдено {len(packets)}")
+    if len(packets) % 16:
+        raise SystemExit(f"Ожидалось целое число слотов по 16 пакетов, найдено {len(packets)}")
     if args.gradient:
         packets = gradient_packets(packets)
         print("Используется тестовый 2D RGB565-градиент", flush=True)

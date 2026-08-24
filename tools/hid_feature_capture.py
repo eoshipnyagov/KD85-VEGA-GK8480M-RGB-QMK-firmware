@@ -37,7 +37,10 @@ function hookBufferFunction(moduleName, functionName, bufferArg, lengthArg) {
     });
 }
 
-const getFeature = Process.getModuleByName('hid.dll').getExportByName('HidD_GetFeature');
+let hidModule;
+try { hidModule = Process.getModuleByName('hid.dll'); }
+catch (_) { hidModule = Module.load('hid.dll'); }
+const getFeature = hidModule.getExportByName('HidD_GetFeature');
 send({hooked: 'HidD_GetFeature', address: getFeature.toString()});
 Interceptor.attach(getFeature, {
     onEnter(args) {
@@ -119,15 +122,22 @@ hookCreateFileA();
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture HidD_SetFeature calls")
     parser.add_argument("--process", default="Vega Screen Software.exe")
+    parser.add_argument("--spawn", help="запустить этот exe и подключиться до его старта")
     parser.add_argument("--seconds", type=float, default=120.0)
     args = parser.parse_args()
 
     device = frida.get_local_device()
-    matches = [p for p in device.enumerate_processes() if p.name.lower() == args.process.lower()]
-    if len(matches) != 1:
-        raise SystemExit(f"expected one process named {args.process!r}, found {len(matches)}")
-
-    session = device.attach(matches[0].pid)
+    spawned_pid = None
+    if args.spawn:
+        spawned_pid = device.spawn([args.spawn])
+        session = device.attach(spawned_pid)
+        target_pid = spawned_pid
+    else:
+        matches = [p for p in device.enumerate_processes() if p.name.lower() == args.process.lower()]
+        if len(matches) != 1:
+            raise SystemExit(f"expected one process named {args.process!r}, found {len(matches)}")
+        session = device.attach(matches[0].pid)
+        target_pid = matches[0].pid
 
     def on_message(message, data):
         if message.get("type") == "send":
@@ -143,7 +153,9 @@ def main() -> int:
     script = session.create_script(HOOK)
     script.on("message", on_message)
     script.load()
-    print(json.dumps({"attached_pid": matches[0].pid, "read_only": True}), flush=True)
+    if spawned_pid is not None:
+        device.resume(spawned_pid)
+    print(json.dumps({"attached_pid": target_pid, "read_only": True, "spawned": spawned_pid is not None}), flush=True)
     try:
         time.sleep(args.seconds)
     finally:
