@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Upload one TFT frame using the recovered official VEGA HID sequence.
+
+The JSONL file is used only as a protocol template: service reports and the
+64-KiB slot headers/tails are copied, while RGB565 pixels come from the input
+image.  This is deliberately limited to one frame in the first iteration.
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import ctypes.wintypes as w
+import json
+import struct
+import time
+from pathlib import Path
+
+import hid
+from PIL import Image
+
+VID, PID = 0x05AC, 0x024F
+MI03_INTERFACE, MI03_USAGE = 3, 0xFF13
+MI02_INTERFACE, MI02_USAGE = 2, 0xFF68
+REPORT = 4097
+SLOT = 65536
+HEADER = 256
+WIDTH, HEIGHT = 240, 135
+PIXELS = WIDTH * HEIGHT * 2
+GENERIC_WRITE = 0x40000000
+FILE_FLAG_OVERLAPPED = 0x40000000
+ERROR_IO_PENDING = 997
+
+
+class OVERLAPPED(ctypes.Structure):
+    _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
+                ("Offset", w.DWORD), ("OffsetHigh", w.DWORD), ("hEvent", w.HANDLE)]
+
+
+def read_template(path: Path) -> tuple[list[tuple[str, bytes]], list[bytes]]:
+    events: list[tuple[str, bytes]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        source = row.get("source")
+        if source == "HidD_SetFeature" and row.get("length") == 65:
+            data = bytes(row.get("data", []))
+            if len(data) == 65:
+                events.append(("feature", data))
+        elif source == "WriteFile" and row.get("length") == REPORT:
+            data = bytes(row.get("data", []))
+            if len(data) == REPORT:
+                events.append(("frame", data))
+    frame_positions = [i for i, (kind, _) in enumerate(events) if kind == "frame"]
+    if len(frame_positions) < 16:
+        raise SystemExit(f"В шаблоне найдено только {len(frame_positions)} кадровых пакетов; нужно 16")
+    # First official one-frame upload: retain the service sequence surrounding
+    # the first 16 frame writes and ignore unrelated startup traffic.
+    first = frame_positions[0]
+    last = frame_positions[15]
+    selected = events[max(0, first - 32):last + 1]
+    if sum(kind == "frame" for kind, _ in selected) != 16:
+        raise SystemExit("Не удалось выделить ровно один слот из шаблона")
+    return selected, [data for kind, data in selected if kind == "frame"]
+
+
+def rgb565(path: Path) -> bytes:
+    image = Image.open(path).convert("RGB").resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
+    out = bytearray(PIXELS)
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            r, g, b = image.getpixel((x, y))
+            value = ((r * 31 // 255) << 11) | ((g * 63 // 255) << 5) | (b * 31 // 255)
+            struct.pack_into("<H", out, (y * WIDTH + x) * 2, value)
+    return bytes(out)
+
+
+def replace_pixels(packets: list[bytes], pixels: bytes) -> list[bytes]:
+    block = b"".join(packet[1:] for packet in packets)
+    if len(block) != SLOT:
+        raise SystemExit(f"Слот имеет размер {len(block)}, ожидалось 65536")
+    block = block[:HEADER] + pixels + block[HEADER + PIXELS:]
+    return [b"\x00" + block[offset:offset + 4096] for offset in range(0, SLOT, 4096)]
+
+
+def find_one(interface: int, usage: int):
+    devices = [d for d in hid.enumerate(VID, PID)
+               if d.get("interface_number") == interface and d.get("usage_page") == usage]
+    if len(devices) != 1:
+        raise SystemExit(f"Нужный HID-интерфейс не найден однозначно: {len(devices)}")
+    return devices[0]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("template", type=Path, help="JSONL-захват одной официальной загрузки")
+    ap.add_argument("image", type=Path, help="PNG/JPG/GIF; используется первый кадр")
+    ap.add_argument("--confirm", action="store_true", help="разрешить запись в экран")
+    ap.add_argument("--dry-run", action="store_true", help="только собрать и проверить пакеты")
+    ap.add_argument("--interval", type=float, default=0.03, help="пауза между HID-пакетами")
+    args = ap.parse_args()
+    sequence, captured = read_template(args.template)
+    pixels = rgb565(args.image)
+    frames = replace_pixels(captured, pixels)
+    print(f"Шаблон: 16 пакетов, {sum(k == 'feature' for k, _ in sequence)} service-отчётов")
+    print(f"Изображение: {args.image} -> 240x135 RGB565")
+    if args.dry_run:
+        print("Пробный режим: устройство не изменялось")
+        return
+    if not args.confirm:
+        raise SystemExit("Для записи нужен явный флаг --confirm")
+
+    mi03 = find_one(MI03_INTERFACE, MI03_USAGE)
+    mi02 = find_one(MI02_INTERFACE, MI02_USAGE)
+    service = hid.device()
+    service.open_path(mi03["path"])
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_WRITE, 3, None, 3,
+                                  FILE_FLAG_OVERLAPPED, None)
+    if handle in (0, -1):
+        service.close()
+        raise OSError(f"MI_02 CreateFileW failed: {ctypes.GetLastError()}")
+
+    pending = []
+    frame_index = 0
+    try:
+        for kind, data in sequence:
+            if kind == "feature":
+                if service.send_feature_report(data) < 0:
+                    raise RuntimeError("MI_03 service report rejected")
+            else:
+                packet = frames[frame_index]
+                frame_index += 1
+                event = kernel32.CreateEventW(None, True, False, None)
+                ov = OVERLAPPED(); ov.hEvent = event
+                buf = ctypes.create_string_buffer(packet)
+                written = w.DWORD(0)
+                ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), ctypes.byref(ov))
+                error = ctypes.GetLastError()
+                if not ok and error != ERROR_IO_PENDING:
+                    raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {error}")
+                pending.append((event, ov, buf))
+                time.sleep(args.interval)
+        time.sleep(2.0)
+        print("Загрузка одного кадра завершена")
+    finally:
+        for event, _, _ in pending:
+            kernel32.CloseHandle(event)
+        kernel32.CloseHandle(handle)
+        service.close()
+
+
+if __name__ == "__main__":
+    main()
