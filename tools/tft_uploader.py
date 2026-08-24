@@ -148,6 +148,7 @@ def main() -> None:
     ap.add_argument("--confirm", action="store_true", help="разрешить запись в экран")
     ap.add_argument("--dry-run", action="store_true", help="только собрать и проверить пакеты")
     ap.add_argument("--no-ack", action="store_true", help="не читать ACK; только для диагностики с USBPcap")
+    ap.add_argument("--retries", type=int, default=3, help="повторы пакета при таймауте ACK")
     ap.add_argument("--interval", type=float, default=0.03, help="пауза между HID-пакетами")
     args = ap.parse_args()
     sequence, captured = read_template(args.template, args.frame_count)
@@ -214,14 +215,25 @@ def main() -> None:
                 frame_index += 1
                 buf = ctypes.create_string_buffer(packet)
                 written = w.DWORD(0)
-                ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), None)
-                if not ok or written.value != len(packet):
-                    raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {ctypes.GetLastError()}, written={written.value}")
-                if not args.no_ack:
-                    ack = read_input_report(kernel32, read_handle)
-                    payload = ack[1:] if ack[:1] == b"\x00" else ack
-                    if len(payload) < 3 or payload[0:3] != bytes((1, 0x5A, 2)):
-                        raise RuntimeError(f"MI_02 packet {frame_index}: unexpected ACK {bytes(ack).hex()}")
+                attempts = 0
+                while True:
+                    attempts += 1
+                    written = w.DWORD(0)
+                    ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), None)
+                    if not ok or written.value != len(packet):
+                        raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {ctypes.GetLastError()}, written={written.value}")
+                    if args.no_ack:
+                        break
+                    try:
+                        ack = read_input_report(kernel32, read_handle)
+                        payload = ack[1:] if ack[:1] == b"\x00" else ack
+                        if len(payload) < 3 or payload[0:3] != bytes((1, 0x5A, 2)):
+                            raise RuntimeError(f"MI_02 packet {frame_index}: unexpected ACK {bytes(ack).hex()}")
+                        break
+                    except TimeoutError:
+                        if attempts > args.retries:
+                            raise RuntimeError(f"MI_02 packet {frame_index}: ACK timeout after {attempts} attempts")
+                        print(f"MI_02 packet {frame_index}: ACK timeout, retry {attempts}/{args.retries}", flush=True)
                 time.sleep(args.interval)
         time.sleep(2.0)
         print("Загрузка одного кадра завершена")
