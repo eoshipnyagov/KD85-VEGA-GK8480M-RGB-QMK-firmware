@@ -27,6 +27,7 @@ HEADER = 256
 WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
 GENERIC_WRITE = 0x40000000
+GENERIC_READ = 0x80000000
 def read_template(path: Path, frame_count: int) -> tuple[list[tuple[str, bytes]], list[bytes]]:
     events: list[tuple[str, bytes]] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -130,11 +131,15 @@ def main() -> None:
     mi02 = find_one(MI02_INTERFACE, MI02_USAGE)
     service = hid.device()
     service.open_path(mi03["path"])
+    input_device = hid.device()
+    input_device.open_path(mi02["path"])
+    input_device.set_nonblocking(False)
     kernel32 = ctypes.windll.kernel32
     # Use synchronous writes. With an overlapped handle, closing the handle
     # after the nominal delay can cancel queued HID transfers before USBPcap
     # ever sees them.
-    handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_WRITE, 3, None, 3, 0, None)
+    handle = kernel32.CreateFileW(mi02["path"].decode(), GENERIC_READ | GENERIC_WRITE,
+                                  3, None, 3, 0, None)
     if handle in (0, -1):
         service.close()
         raise OSError(f"MI_02 CreateFileW failed: {ctypes.GetLastError()}")
@@ -145,6 +150,9 @@ def main() -> None:
             if kind == "feature":
                 if service.send_feature_report(data) < 0:
                     raise RuntimeError("MI_03 service report rejected")
+                response = service.get_feature_report(0, 65)
+                if not response:
+                    raise RuntimeError("MI_03 did not return a feature response")
             else:
                 packet = frames[frame_index]
                 frame_index += 1
@@ -153,11 +161,15 @@ def main() -> None:
                 ok = kernel32.WriteFile(handle, buf, len(packet), ctypes.byref(written), None)
                 if not ok or written.value != len(packet):
                     raise OSError(f"MI_02 packet {frame_index}: WriteFile failed: {ctypes.GetLastError()}, written={written.value}")
+                ack = input_device.read(64, timeout_ms=1500)
+                if len(ack) < 3 or ack[0:3] != [1, 0x5A, 2]:
+                    raise RuntimeError(f"MI_02 packet {frame_index}: unexpected ACK {bytes(ack).hex()}")
                 time.sleep(args.interval)
         time.sleep(2.0)
         print("Загрузка одного кадра завершена")
     finally:
         kernel32.CloseHandle(handle)
+        input_device.close()
         service.close()
 
 
