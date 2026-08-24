@@ -10,6 +10,7 @@ import argparse
 import ctypes
 import ctypes.wintypes as w
 import json
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -18,6 +19,10 @@ import hid
 
 VID, PID, INTERFACE, USAGE_PAGE = 0x05AC, 0x024F, 3, 0xFF13
 PACKET_SIZE = 4097
+SLOT_SIZE = 65536
+HEADER_SIZE = 256
+WIDTH, HEIGHT = 240, 135
+FRAME_SIZE = WIDTH * HEIGHT * 2
 GENERIC_WRITE = 0x40000000
 FILE_FLAG_OVERLAPPED = 0x40000000
 ERROR_IO_PENDING = 997
@@ -52,10 +57,28 @@ def load_packets(path: Path, handle: str | None) -> list[bytes]:
     return packets
 
 
+def gradient_packets(packets: list[bytes]) -> list[bytes]:
+    """Replace only the captured slot's RGB565 pixels with a 2D gradient."""
+    block = b"".join(packet[1:] for packet in packets)
+    if len(block) != SLOT_SIZE:
+        raise ValueError("captured slot must be exactly 64 KiB")
+    pixels = bytearray(FRAME_SIZE)
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            red = x * 31 // (WIDTH - 1)
+            green = y * 63 // (HEIGHT - 1)
+            blue = (WIDTH - 1 - x) * 31 // (WIDTH - 1)
+            value = (red << 11) | (green << 5) | blue
+            struct.pack_into("<H", pixels, (y * WIDTH + x) * 2, value)
+    block = block[:HEADER_SIZE] + bytes(pixels) + block[HEADER_SIZE + FRAME_SIZE:]
+    return [b"\x00" + block[offset:offset + 4096] for offset in range(0, SLOT_SIZE, 4096)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("jsonl", type=Path)
     parser.add_argument("--handle", default="0x7c8")
+    parser.add_argument("--gradient", action="store_true", help="заменить пиксели на 2D RGB565-градиент")
     parser.add_argument("--confirm", action="store_true")
     args = parser.parse_args()
     if not args.confirm:
@@ -63,6 +86,9 @@ def main() -> None:
     packets = load_packets(args.jsonl, args.handle)
     if len(packets) != 16:
         raise SystemExit(f"Ожидалось 16 пакетов одного слота, найдено {len(packets)}")
+    if args.gradient:
+        packets = gradient_packets(packets)
+        print("Используется тестовый 2D RGB565-градиент", flush=True)
 
     devices = [d for d in hid.enumerate(VID, PID)
                if d.get("interface_number") == INTERFACE and d.get("usage_page") == USAGE_PAGE]
