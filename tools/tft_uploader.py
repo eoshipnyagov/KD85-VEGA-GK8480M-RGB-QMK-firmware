@@ -27,7 +27,7 @@ HEADER = 256
 WIDTH, HEIGHT = 240, 135
 PIXELS = WIDTH * HEIGHT * 2
 GENERIC_WRITE = 0x40000000
-def read_template(path: Path) -> tuple[list[tuple[str, bytes]], list[bytes]]:
+def read_template(path: Path, frame_count: int) -> tuple[list[tuple[str, bytes]], list[bytes]]:
     events: list[tuple[str, bytes]] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -44,12 +44,13 @@ def read_template(path: Path) -> tuple[list[tuple[str, bytes]], list[bytes]]:
             if len(data) == REPORT:
                 events.append(("frame", data))
     frame_positions = [i for i, (kind, _) in enumerate(events) if kind == "frame"]
-    if len(frame_positions) < 16:
-        raise SystemExit(f"В шаблоне найдено только {len(frame_positions)} кадровых пакетов; нужно 16")
+    needed = frame_count * 16
+    if len(frame_positions) < needed:
+        raise SystemExit(f"В шаблоне найдено только {len(frame_positions)} кадровых пакетов; нужно {needed}")
     # First official one-frame upload: retain the service sequence surrounding
     # the first 16 frame writes and ignore unrelated startup traffic.
     first = frame_positions[0]
-    last = frame_positions[15]
+    last = frame_positions[needed - 1]
     end = last + 1
     # The official uploader emits a final service report immediately after
     # the last data packet (04 02 in the captured one-frame session). Keep it:
@@ -57,13 +58,13 @@ def read_template(path: Path) -> tuple[list[tuple[str, bytes]], list[bytes]]:
     while end < len(events) and events[end][0] == "feature":
         end += 1
     selected = events[max(0, first - 32):end]
-    if sum(kind == "frame" for kind, _ in selected) != 16:
-        raise SystemExit("Не удалось выделить ровно один слот из шаблона")
+    if sum(kind == "frame" for kind, _ in selected) != needed:
+        raise SystemExit(f"Не удалось выделить ровно {frame_count} слот(а/ов) из шаблона")
     return selected, [data for kind, data in selected if kind == "frame"]
 
 
-def rgb565(path: Path) -> bytes:
-    image = Image.open(path).convert("RGB").resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
+def rgb565(image: Image.Image) -> bytes:
+    image = image.convert("RGB").resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
     out = bytearray(PIXELS)
     for y in range(HEIGHT):
         for x in range(WIDTH):
@@ -75,12 +76,19 @@ def rgb565(path: Path) -> bytes:
     return bytes(out)
 
 
-def replace_pixels(packets: list[bytes], pixels: bytes) -> list[bytes]:
-    block = b"".join(packet[1:] for packet in packets)
-    if len(block) != SLOT:
-        raise SystemExit(f"Слот имеет размер {len(block)}, ожидалось 65536")
-    block = block[:HEADER] + pixels + block[HEADER + PIXELS:]
-    return [b"\x00" + block[offset:offset + 4096] for offset in range(0, SLOT, 4096)]
+def replace_pixels(packets: list[bytes], pixel_frames: list[bytes]) -> list[bytes]:
+    if len(packets) != len(pixel_frames) * 16:
+        raise SystemExit("Число пакетов не соответствует числу кадров")
+    output = []
+    for frame_index, pixels in enumerate(pixel_frames):
+        group = packets[frame_index * 16:(frame_index + 1) * 16]
+        block = b"".join(packet[1:] for packet in group)
+        if len(block) != SLOT:
+            raise SystemExit(f"Слот {frame_index} имеет размер {len(block)}, ожидалось 65536")
+        block = block[:HEADER] + pixels + block[HEADER + PIXELS:]
+        output.extend(b"\x00" + block[offset:offset + 4096]
+                      for offset in range(0, SLOT, 4096))
+    return output
 
 
 def find_one(interface: int, usage: int):
@@ -95,15 +103,23 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("template", type=Path, help="JSONL-захват одной официальной загрузки")
     ap.add_argument("image", type=Path, help="PNG/JPG/GIF; используется первый кадр")
+    ap.add_argument("--frame-count", type=int, choices=(1, 2), default=1,
+                    help="число кадров в сессии; для GIF берутся первые кадры")
     ap.add_argument("--confirm", action="store_true", help="разрешить запись в экран")
     ap.add_argument("--dry-run", action="store_true", help="только собрать и проверить пакеты")
     ap.add_argument("--interval", type=float, default=0.03, help="пауза между HID-пакетами")
     args = ap.parse_args()
-    sequence, captured = read_template(args.template)
-    pixels = rgb565(args.image)
-    frames = replace_pixels(captured, pixels)
-    print(f"Шаблон: 16 пакетов, {sum(k == 'feature' for k, _ in sequence)} service-отчётов")
-    print(f"Изображение: {args.image} -> 240x135 RGB565")
+    sequence, captured = read_template(args.template, args.frame_count)
+    source = Image.open(args.image)
+    if getattr(source, "n_frames", 1) < args.frame_count:
+        raise SystemExit(f"В изображении только {getattr(source, 'n_frames', 1)} кадр(а/ов)")
+    pixel_frames = []
+    for index in range(args.frame_count):
+        source.seek(index)
+        pixel_frames.append(rgb565(source.copy()))
+    frames = replace_pixels(captured, pixel_frames)
+    print(f"Шаблон: {args.frame_count} слот(а/ов), {sum(k == 'feature' for k, _ in sequence)} service-отчётов")
+    print(f"Изображение: {args.image} -> {args.frame_count} кадр(а/ов), 240x135 RGB565")
     if args.dry_run:
         print("Пробный режим: устройство не изменялось")
         return
