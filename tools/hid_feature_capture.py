@@ -25,9 +25,11 @@ function hookBufferFunction(moduleName, functionName, bufferArg, lengthArg) {
             const length = args[lengthArg].toInt32();
             this.handle = args[0];
             this.length = length;
-            if (length > 0 && length <= 4096 && !args[bufferArg].isNull()) {
-                send({source: functionName, handle: this.handle.toString(), length: length}, args[bufferArg].readByteArray(length));
-            }
+            const meta = {source: functionName, handle: this.handle.toString(), length: length};
+            if (length > 0 && length <= 1048576 && !args[bufferArg].isNull())
+                send(meta, args[bufferArg].readByteArray(length));
+            else
+                send(meta);
         },
         onLeave(retval) {
             send({source: functionName + ':return', handle: this.handle.toString(), retval: retval.toString()});
